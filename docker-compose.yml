@@ -1,0 +1,265 @@
+# =============================================================================
+# Car Rental System — development environment
+#
+#   cp .env.example .env
+#   docker compose up --build        # build images locally and start everything
+#   docker compose pull && docker compose up   # use the images CI pushed to GHCR
+#   docker compose down               # stop (add -v to also wipe database data)
+#
+# Layout:
+#   - 5 ASP.NET Core microservices (one image each, multi-stage Dockerfiles)
+#   - 4 PostgreSQL servers, one per service that owns data (database-per-service)
+#   - 1 RabbitMQ broker (single instance) for asynchronous events
+#   - networks: "backend" connects the services + broker; each database sits on
+#     its own private network that only its owning service joins, so no service
+#     can reach another service's database.
+# =============================================================================
+
+name: ${COMPOSE_PROJECT_NAME:-carrental}
+
+# ---------- Reusable fragments ------------------------------------------------
+x-dotnet-service: &dotnet-service
+  restart: unless-stopped
+  logging: &default-logging
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-dotnet-env: &dotnet-env
+  ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT}
+  ASPNETCORE_HTTP_PORTS: "8080"
+
+x-rabbitmq-env: &rabbitmq-env
+  RabbitMq__Enabled: "true"
+  RabbitMq__Host: rabbitmq
+  RabbitMq__Port: "5672"
+  RabbitMq__Username: ${RABBITMQ_USER}
+  RabbitMq__Password: ${RABBITMQ_PASSWORD}
+  RabbitMq__Exchange: ${RABBITMQ_EXCHANGE}
+
+x-postgres: &postgres
+  image: postgres:16-alpine
+  restart: unless-stopped
+  logging: *default-logging
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+    interval: 5s
+    timeout: 5s
+    retries: 10
+    start_period: 10s
+
+services:
+
+  # ===================== Message broker =====================
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: carrental-rabbitmq
+    hostname: rabbitmq          # RabbitMQ stores data per node name; keep it stable
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
+    ports:
+      - "${RABBITMQ_AMQP_PORT}:5672"         # AMQP (for services run from the IDE)
+      - "${RABBITMQ_MANAGEMENT_PORT}:15672"  # management UI: http://localhost:15672
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+
+  # ===================== Databases (one server each) =====================
+  user-db:
+    <<: *postgres
+    container_name: carrental-user-db
+    environment:
+      POSTGRES_DB: ${USER_DB_NAME}
+      POSTGRES_USER: ${USER_DB_USER}
+      POSTGRES_PASSWORD: ${USER_DB_PASSWORD}
+    ports:
+      - "${USER_DB_PORT}:5432"
+    volumes:
+      - user-db-data:/var/lib/postgresql/data
+    networks:
+      - user-db-net
+
+  car-db:
+    <<: *postgres
+    container_name: carrental-car-db
+    environment:
+      POSTGRES_DB: ${CAR_DB_NAME}
+      POSTGRES_USER: ${CAR_DB_USER}
+      POSTGRES_PASSWORD: ${CAR_DB_PASSWORD}
+    ports:
+      - "${CAR_DB_PORT}:5432"
+    volumes:
+      - car-db-data:/var/lib/postgresql/data
+    networks:
+      - car-db-net
+
+  booking-db:
+    <<: *postgres
+    container_name: carrental-booking-db
+    environment:
+      POSTGRES_DB: ${BOOKING_DB_NAME}
+      POSTGRES_USER: ${BOOKING_DB_USER}
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD}
+    ports:
+      - "${BOOKING_DB_PORT}:5432"
+    volumes:
+      - booking-db-data:/var/lib/postgresql/data
+    networks:
+      - booking-db-net
+
+  payment-db:
+    <<: *postgres
+    container_name: carrental-payment-db
+    environment:
+      POSTGRES_DB: ${PAYMENT_DB_NAME}
+      POSTGRES_USER: ${PAYMENT_DB_USER}
+      POSTGRES_PASSWORD: ${PAYMENT_DB_PASSWORD}
+    ports:
+      - "${PAYMENT_DB_PORT}:5432"
+    volumes:
+      - payment-db-data:/var/lib/postgresql/data
+    networks:
+      - payment-db-net
+
+  # ===================== Microservices =====================
+  user-service:
+    <<: *dotnet-service
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/carrental-user-service:${IMAGE_TAG}
+    container_name: carrental-user-service
+    build:
+      context: .                      # repo root: needs nuget.config + CarRental.Shared
+      dockerfile: CarRental.UserService/Dockerfile
+    environment:
+      <<: *dotnet-env
+      # Ready for EF Core (Npgsql) — not used by the in-memory implementation yet.
+      ConnectionStrings__DefaultConnection: Host=user-db;Port=5432;Database=${USER_DB_NAME};Username=${USER_DB_USER};Password=${USER_DB_PASSWORD}
+    ports:
+      - "${USER_SERVICE_PORT}:8080"
+    networks:
+      - backend
+      - user-db-net
+    depends_on:
+      user-db:
+        condition: service_healthy
+
+  car-service:
+    <<: *dotnet-service
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/carrental-car-service:${IMAGE_TAG}
+    container_name: carrental-car-service
+    build:
+      context: .                      # repo root: needs nuget.config + CarRental.Shared
+      dockerfile: CarRental.CarService/Dockerfile
+    environment:
+      <<: *dotnet-env
+      ConnectionStrings__DefaultConnection: Host=car-db;Port=5432;Database=${CAR_DB_NAME};Username=${CAR_DB_USER};Password=${CAR_DB_PASSWORD}
+    ports:
+      - "${CAR_SERVICE_PORT}:8080"
+    networks:
+      - backend
+      - car-db-net
+    depends_on:
+      car-db:
+        condition: service_healthy
+
+  booking-service:
+    <<: *dotnet-service
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/carrental-booking-service:${IMAGE_TAG}
+    container_name: carrental-booking-service
+    build:
+      context: .                      # repo root: needs nuget.config + CarRental.Shared
+      dockerfile: CarRental.BookingService/Dockerfile
+    environment:
+      <<: [*dotnet-env, *rabbitmq-env]
+      ConnectionStrings__DefaultConnection: Host=booking-db;Port=5432;Database=${BOOKING_DB_NAME};Username=${BOOKING_DB_USER};Password=${BOOKING_DB_PASSWORD}
+      # Synchronous REST calls — service names resolve via Docker's internal DNS.
+      Services__CarService: http://car-service:8080
+      Services__UserService: http://user-service:8080
+      Services__NotificationService: http://notification-service:8080   # only used if RabbitMQ is disabled
+    ports:
+      - "${BOOKING_SERVICE_PORT}:8080"
+    networks:
+      - backend
+      - booking-db-net
+    depends_on:
+      booking-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      car-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+
+  payment-service:
+    <<: *dotnet-service
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/carrental-payment-service:${IMAGE_TAG}
+    container_name: carrental-payment-service
+    build:
+      context: .                      # repo root: needs nuget.config + CarRental.Shared
+      dockerfile: CarRental.PaymentService/Dockerfile
+    environment:
+      <<: [*dotnet-env, *rabbitmq-env]
+      ConnectionStrings__DefaultConnection: Host=payment-db;Port=5432;Database=${PAYMENT_DB_NAME};Username=${PAYMENT_DB_USER};Password=${PAYMENT_DB_PASSWORD}
+      Services__BookingService: http://booking-service:8080
+    ports:
+      - "${PAYMENT_SERVICE_PORT}:8080"
+    networks:
+      - backend
+      - payment-db-net
+    depends_on:
+      payment-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      booking-service:
+        condition: service_started
+
+  notification-service:
+    <<: *dotnet-service
+    image: ${REGISTRY}/${IMAGE_NAMESPACE}/carrental-notification-service:${IMAGE_TAG}
+    container_name: carrental-notification-service
+    build:
+      context: .                      # repo root: needs nuget.config + CarRental.Shared
+      dockerfile: CarRental.NotificationService/Dockerfile
+    environment:
+      <<: [*dotnet-env, *rabbitmq-env]
+      # No database — by design.
+    ports:
+      - "${NOTIFICATION_SERVICE_PORT}:8080"
+    networks:
+      - backend
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+# ---------- Networks ----------------------------------------------------------
+networks:
+  backend:          # services <-> services, services <-> RabbitMQ
+    driver: bridge
+  user-db-net:      # user-service <-> user-db only
+    driver: bridge
+  car-db-net:
+    driver: bridge
+  booking-db-net:
+    driver: bridge
+  payment-db-net:
+    driver: bridge
+
+# ---------- Named volumes (data survives `docker compose down`) ----------------
+volumes:
+  rabbitmq-data:
+  user-db-data:
+  car-db-data:
+  booking-db-data:
+  payment-db-data:

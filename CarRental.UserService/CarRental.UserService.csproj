@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+  </ItemGroup>
+
+  <!-- CarRental.Shared hentes som en NuGet-pakke (fra local-nuget-feed, se
+       nuget.config i roden) i stedet for en ProjectReference, så denne
+       service bygger mod en bestemt version af Shared, ikke kildekoden. -->
+  <ItemGroup>
+    <PackageReference Include="CarRental.Shared" Version="1.0.0" />
+  </ItemGroup>
+
+</Project>

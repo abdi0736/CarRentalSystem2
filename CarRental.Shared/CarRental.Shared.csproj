@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    Bygges som en NuGet-pakke i stedet for at blive refereret som ren
+    kildekode af de andre services. Så afhænger hver service af en bestemt,
+    versioneret udgave af det fælles indhold, ikke af hvad koden lige nu
+    tilfældigvis indeholder.
+
+    Hæv <Version> når enums/DTO'er/events her ændres, og byg projektet igen,
+    så de andre services kan hente den nye version via PackageReference.
+  -->
+  <PropertyGroup>
+    <PackageId>CarRental.Shared</PackageId>
+    <Version>1.0.0</Version>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <!-- Hver build lægger .nupkg-filen direkte i det lokale feed i roden,
+         så de andre services kan restore uden en ekstern NuGet-server. -->
+    <PackageOutputPath>..\local-nuget-feed</PackageOutputPath>
+  </PropertyGroup>
+
+</Project>

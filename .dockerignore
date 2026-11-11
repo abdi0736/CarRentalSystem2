@@ -1,0 +1,16 @@
+# Keep the build context small and avoid copying host build output into the
+# image (Windows obj/ folders break restore inside the Linux container).
+**/bin/
+**/obj/
+**/.vs/
+**/.idea/
+**/*.user
+local-nuget-feed/
+.git/
+.github/
+docs/
+.env
+.env.*
+docker-compose*.yml
+**/Dockerfile
+README.md

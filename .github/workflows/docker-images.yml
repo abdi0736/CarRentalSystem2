@@ -1,0 +1,111 @@
+# Builds one Docker image per microservice and pushes it to GitHub Container
+# Registry (ghcr.io/<owner>/carrental-<service>).
+#
+#  - Unit tests run first. If any test fails, no images are built or pushed.
+#  - Pull requests: images are built (to prove the Dockerfiles work) but not pushed.
+#  - Push to main:   images are built and pushed with tags "latest" and "sha-<commit>".
+#  - Tags v1.2.3:    additionally tagged "1.2.3".
+#
+# No secrets to configure: GITHUB_TOKEN is allowed to push packages for this repo
+# because of `permissions: packages: write` below.
+
+name: Build & push Docker images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # NYT: kører alle unit tests før der bygges Docker-images
+  test:
+    name: Run unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build CarRental.Shared (NuGet-pakke til local-nuget-feed)
+        run: dotnet build CarRental.Shared/CarRental.Shared.csproj -c Release
+
+      - name: Run tests
+        run: dotnet test CarRental.BookingService.Tests/CarRental.BookingService.Tests.csproj -c Release
+
+  validate-compose:
+    name: Validate docker-compose.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: docker compose config
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+  build-and-push:
+    name: ${{ matrix.service.name }}
+    needs: [validate-compose, test]   # NYT: venter på at testene er grønne
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - { name: user-service,         project: CarRental.UserService }
+          - { name: car-service,          project: CarRental.CarService }
+          - { name: booking-service,      project: CarRental.BookingService }
+          - { name: notification-service, project: CarRental.NotificationService }
+          - { name: payment-service,      project: CarRental.PaymentService }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Image names must be lowercase; metadata-action handles that for the owner.
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/carrental-${{ matrix.service.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .                                   # repo root (needs CarRental.Shared + nuget.config)
+          file: ${{ matrix.service.project }}/Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service.name }}
